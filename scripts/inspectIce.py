@@ -1,9 +1,14 @@
 #!/usr/bin/env python
 import numpy as np
+import scipy
+import scipy.ndimage
 import h5py as h
 import glob
 import os, re, sys
 import matplotlib
+import matplotlib.patches
+import photutils
+from photutils import centroid_com
 import pylab as plt
 from myModules import extractDetectorDist as eDD
 from optparse import OptionParser
@@ -20,9 +25,38 @@ parser.add_option("-m", "--mask", action="store", type="string", dest="maskFile"
 parser.add_option("-W", "--waterAveraging", action="store_true", dest="averageWaterTypes", help="average pattern and angavg of water types", default=False)
 parser.add_option("-M", "--maxIntens", action="store", type="int", dest="maxIntens", help="doesn't plot intensities above this value (default:2000)", default=2000)
 parser.add_option("-S", "--sortTypes", action="store", type="int", dest="sortTypes", help="default:0. -1(descending total intens), 0(peakyness), 1(ascending total intens).", default=0)
-parser.add_option("-T", "--thresholdType2", action="store", type="float", dest="thresholdType2", help="sets threshold for max intensity of angular average below which hits are automatically sorted to type2 (default:0)", default=0)
+parser.add_option("-T", "--thresholdIce", action="store", type="float", dest="thresholdIce", help="sets number of standard deviations and average intensities to use as threshold for peak finding (default:2)", default=2)
+parser.add_option("-D", "--peakDimension", action="store", type="float", dest="peakDimension", help="sets threshold for minimum number of pixels for each peak dimension (default:10 pixels)", default=10)
 parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="print more stuff to terminal", default=False)
 (options, args) = parser.parse_args()
+
+#Function to detect ice peaks
+def detect_peaks(img, int_threshold, peak_threshold, mask=None, center=None):
+	threshold = int_threshold*(np.mean(img)+np.std(img))
+	image_thresholded = np.copy(img)
+	# TODO: look at only non-masked pixels
+	image_thresholded[img<threshold] = 0
+	#find the peak regions and label all the pixels
+	labeled_image, number_of_peaks = scipy.ndimage.label(image_thresholded)
+	peak_regions = scipy.ndimage.find_objects(labeled_image)
+	peak_list = []
+	for peak_region_i in peak_regions:
+		ry = img[peak_region_i].shape[0]
+		rx = img[peak_region_i].shape[1]
+		if (ry>peak_threshold) and (rx>peak_threshold):
+			img_peak = np.zeros_like(img)
+			img_peak[peak_region_i] = img[peak_region_i]
+			# TODO: improve peak width with 1D Gaussian fit
+			if (ry > rx):
+				r = ry/2.
+			else:
+				r = rx/2.
+			# current reference position is first element of 2D array (lower left corner), not center
+			cy,cx = centroid_com(img_peak)
+			#cy -= (img_peak.shape[0]-1)/2.
+			#cx -= (img_peak.shape[1]-1)/2.
+			peak_list.append([img[peak_region_i],(cy,cx),r])
+	return peak_list
 
 #Tagging directories with the correct names
 runtag = "r%s"%(options.runNumber)
@@ -111,10 +145,11 @@ storeFlag = 0
 # Imaging class copied from Ingrid Ofte's pyana_misc code
 ########################################################
 class img_class (object):
-	def __init__(self, inarr, inangavg , filename, meanWaveLengthInAngs=eDD.nominalWavelengthInAngs, detectorDistance=eDD.get_detector_dist_in_meters(runtag)):
+	def __init__(self, inarr, inangavg, filename, peakList=None, meanWaveLengthInAngs=eDD.nominalWavelengthInAngs, detectorDistance=eDD.get_detector_dist_in_meters(runtag)):
 		self.inarr = inarr*(inarr>0)
 		self.filename = filename
 		self.inangavg = inangavg
+		self.inpeaks = peakList
 		self.wavelength = meanWaveLengthInAngs
 		self.detectorDistance = detectorDistance
 		self.HIceQ ={}
@@ -248,6 +283,13 @@ class img_class (object):
 		cmap = matplotlib.cm.gnuplot
 		cmap.set_bad('grey',1.)
 		#cmap.set_under('white',1.)
+		if self.inpeaks is not None:
+			# plot peaks (peak[0]: 2D img, peak[1]: center of mass, peak[2]: radius)
+			ax = fig.gca()
+			for peak in self.inpeaks:
+				circ = plt.Circle(peak[1], radius=peak[2], linewidth=2, color='w')
+				circ.set_fill(False)
+				ax.add_patch(circ)
 		canvas = fig.add_subplot(122)
 		canvas.set_title("angular average")
 		maxAngAvg = (self.inangavg).max()
@@ -262,20 +304,7 @@ class img_class (object):
 			labelPosition += maxAngAvg/numQLabels
 		
 		plt.plot(self.inangavg)
-		#Check for max intensity of angular average below threshold
-		if (not options.inspectOnly and (self.inangavg[200:1150]).max() < options.thresholdType2):
-			print "%s automatically characterized as type2." % (self.filename)
-			storeFlag = 2
-			if(not os.path.exists(write_anomaly_dir_types[storeFlag])):
-				os.mkdir(write_anomaly_dir_types[storeFlag])
-			self.axes.set_clim(0, 50)
-			pngtag = write_anomaly_dir_types[storeFlag] + "%s.png" % (self.filename)
-			plt.savefig(pngtag)
-			print "%s saved." % (pngtag)
-			self.tag = storeFlag
-			plt.close()
-		else:
-			plt.show()
+		plt.show()
 	
 	def draw_spectrum(self):
 		if options.verbose:
@@ -353,12 +382,15 @@ for fname in anomalies:
 	davg = np.array(f['data']['data'][1])
 	q = np.array(f['data']['data'][0])
 	f.close()
-	print "%s: wavelength:%lf, detectorPos:%lf"%(re.sub("-angavg.h5",'',fname),currWavelengthInAngs,currDetectorDist)
 	if mask is not None:
 		img_array = np.ma.masked_where(mask==0, d)
 	else:
 		img_array = d
-	currImg = img_class(img_array, davg, fname, meanWaveLengthInAngs=currWavelengthInAngs, detectorDistance=currDetectorDist)
+	# calculate ice peaks
+	peak_list = detect_peaks(d, options.thresholdIce, options.peakDimension, mask=mask)
+	print "%s: wavelength:%lf, detectorPos:%lf, peaks:%d"%(re.sub("-angavg.h5",'',fname),currWavelengthInAngs,currDetectorDist, len(peak_list))
+	# plot peaks
+	currImg = img_class(img_array, davg, fname, peakList=peak_list, meanWaveLengthInAngs=currWavelengthInAngs, detectorDistance=currDetectorDist)
 	currImg.draw_img_for_tagging()
 	if((storeFlag in rangeNumTypes) and not options.inspectOnly):
 		waveLengths[storeFlag].append(currWavelengthInAngs)
