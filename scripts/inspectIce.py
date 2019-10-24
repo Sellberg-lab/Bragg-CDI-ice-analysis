@@ -9,6 +9,8 @@ import matplotlib
 import matplotlib.patches
 import photutils
 from photutils import centroid_com
+import cv2
+from scipy.ndimage.morphology import binary_fill_holes
 import pylab as plt
 from myModules import extractDetectorDist as eDD
 from optparse import OptionParser
@@ -29,34 +31,6 @@ parser.add_option("-T", "--thresholdIce", action="store", type="float", dest="th
 parser.add_option("-D", "--peakDimension", action="store", type="float", dest="peakDimension", help="sets threshold for minimum number of pixels for each peak dimension (default:10 pixels)", default=10)
 parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="print more stuff to terminal", default=False)
 (options, args) = parser.parse_args()
-
-#Function to detect ice peaks
-def detect_peaks(img, int_threshold, peak_threshold, mask=None, center=None):
-	threshold = int_threshold*(np.mean(img)+np.std(img))
-	image_thresholded = np.copy(img)
-	# TODO: look at only non-masked pixels
-	image_thresholded[img<threshold] = 0
-	#find the peak regions and label all the pixels
-	labeled_image, number_of_peaks = scipy.ndimage.label(image_thresholded)
-	peak_regions = scipy.ndimage.find_objects(labeled_image)
-	peak_list = []
-	for peak_region_i in peak_regions:
-		ry = img[peak_region_i].shape[0]
-		rx = img[peak_region_i].shape[1]
-		if (ry>peak_threshold) and (rx>peak_threshold):
-			img_peak = np.zeros_like(img)
-			img_peak[peak_region_i] = img[peak_region_i]
-			# TODO: improve peak width with 1D Gaussian fit
-			if (ry > rx):
-				r = ry/2.
-			else:
-				r = rx/2.
-			# current reference position is first element of 2D array (lower left corner), not center
-			cy,cx = centroid_com(img_peak)
-			#cy -= (img_peak.shape[0]-1)/2.
-			#cx -= (img_peak.shape[1]-1)/2.
-			peak_list.append([img[peak_region_i],(cy,cx),r])
-	return peak_list
 
 #Tagging directories with the correct names
 runtag = "r%s"%(options.runNumber)
@@ -85,6 +59,56 @@ if options.maskFile is not None:
 	f.close()
 else:
 	mask = None
+	
+#Function to detect ice peaks and centroids
+def detect_peaks(img, int_threshold, peak_threshold, mask=None, center=None):
+	threshold = int_threshold*(np.mean(img)+np.std(img))
+	image_thresholded = np.copy(img)
+	# TODO: look at only non-masked pixels
+	image_thresholded[img<threshold] = 0
+	#find the peak regions and label all the pixels
+	labeled_image, number_of_peaks = scipy.ndimage.label(image_thresholded)
+	peak_regions = scipy.ndimage.find_objects(labeled_image)
+	peak_list = []
+	for peak_region_i in peak_regions:
+		ry = img[peak_region_i].shape[0]
+		rx = img[peak_region_i].shape[1]
+		if (ry>peak_threshold) and (rx>peak_threshold):
+			img_peak = np.zeros_like(img)
+			img_peak[peak_region_i] = img[peak_region_i]
+			# TODO: improve peak width with 1D Gaussian fit
+			if (ry > rx):
+				r = ry/2.
+			else:
+				r = rx/2.
+			# current reference position is first element of 2D array (lower left corner), not center
+			cy,cx = centroid_com(img_peak)
+			#cy -= (img_peak.shape[0]-1)/2.
+			#cx -= (img_peak.shape[1]-1)/2.
+			peak_list.append([img[peak_region_i],(cy,cx),r])
+	return peak_list
+
+# Function to calculate the sphericity of each peak
+def peak_sphericity(img,int_threshold,peak_threshold, BG_level = 100, photon_threshold = 2000):
+    p = []
+    sphericity_of_peak = []
+    # make a list of the bounding box of the peaks
+    for i in np.arange(len(detect_peaks(img, int_threshold, peak_threshold))):
+        p.append(detect_peaks(img, int_threshold, peak_threshold)[i][0])
+    for p_i in np.arange(len(p)):
+        p_sub = p[p_i] - BG_level
+        p_mask = p_sub > photon_threshold
+        fill_holes = binary_fill_holes(p_mask)
+        contours,_= cv2.findContours(fill_holes.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        for cnt in contours:
+            perimeter = cv2.arcLength(cnt, True)
+            area = cv2.contourArea(cnt)
+            if perimeter != 0:
+                sphericity = 4*np.pi*area/(perimeter**2)     
+                cnt_string = 'Numbers of contours for peak {} : {}, sphericity: {}'
+                print(cnt_string.format(p_i, len(contours), sphericity))
+                sphericity_of_peak.append((p[p_i],sphericity))
+    return sphericity_of_peak
 
 #Change into data directory to extract *angavg.h5 files from the ice anomaly type
 arr = []
@@ -389,6 +413,8 @@ for fname in anomalies:
 	# calculate ice peaks
 	peak_list = detect_peaks(d, options.thresholdIce, options.peakDimension, mask=mask)
 	print "%s: wavelength:%lf, detectorPos:%lf, peaks:%d"%(re.sub("-angavg.h5",'',fname),currWavelengthInAngs,currDetectorDist, len(peak_list))
+	# calculate sphericity
+	sphericity_list = peak_sphericity(d, options.thresholdIce, options.peakDimension)
 	# plot peaks
 	currImg = img_class(img_array, davg, fname, peakList=peak_list, meanWaveLengthInAngs=currWavelengthInAngs, detectorDistance=currDetectorDist)
 	currImg.draw_img_for_tagging()
