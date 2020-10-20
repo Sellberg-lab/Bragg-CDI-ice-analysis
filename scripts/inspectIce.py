@@ -9,8 +9,6 @@ import matplotlib
 import matplotlib.patches
 import photutils
 from photutils import centroid_com
-import cv2
-from scipy.ndimage.morphology import binary_fill_holes
 import pylab as plt
 from myModules import extractDetectorDist as eDD
 from optparse import OptionParser
@@ -21,6 +19,7 @@ warnings.simplefilter(action='ignore', category=FutureWarning)
 parser = OptionParser()
 parser.add_option("-r", "--run", action="store", type="string", dest="runNumber", help="run number you wish to view", metavar="rxxxx")
 parser.add_option("-i", "--inspectOnly", action="store_true", dest="inspectOnly", help="inspect output directory", default=False)
+parser.add_option("-p", "--processPeaks", action="store_true", dest="processPeaks", help="processes peaks without inspection", default=False)
 parser.add_option("-o", "--outputDir", action="store", type="string", dest="outputDir", help="output directory will be appended by run number (default: output_rxxxx); separate types will be stored in output_rxxxx/type[1-3]", default="output")
 parser.add_option("-t", "--iceType", action="store", type="int", dest="iceType", help="default:1 = output_rxxxx/type1", default=1)
 parser.add_option("-m", "--mask", action="store", type="string", dest="maskFile", help="mask file in the output directory to be used for viewing (default: None)", default=None)
@@ -31,6 +30,34 @@ parser.add_option("-T", "--thresholdIce", action="store", type="float", dest="th
 parser.add_option("-D", "--peakDimension", action="store", type="float", dest="peakDimension", help="sets threshold for minimum number of pixels for each peak dimension (default:10 pixels)", default=10)
 parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="print more stuff to terminal", default=False)
 (options, args) = parser.parse_args()
+
+#Function to detect ice peaks
+def detect_peaks(img, int_threshold, peak_threshold, mask=None, center=None):
+	threshold = int_threshold*(np.mean(img)+np.std(img))
+	image_thresholded = np.copy(img)
+	# TODO: look at only non-masked pixels
+	image_thresholded[img<threshold] = 0
+	#find the peak regions and label all the pixels
+	labeled_image, number_of_peaks = scipy.ndimage.label(image_thresholded)
+	peak_regions = scipy.ndimage.find_objects(labeled_image)
+	peak_list = []
+	for peak_region_i in peak_regions:
+		ry = img[peak_region_i].shape[0]
+		rx = img[peak_region_i].shape[1]
+		if (ry>peak_threshold) and (rx>peak_threshold):
+			img_peak = np.zeros_like(img)
+			img_peak[peak_region_i] = img[peak_region_i]
+			# TODO: improve peak width with 1D Gaussian fit
+			if (ry > rx):
+				r = ry/2.
+			else:
+				r = rx/2.
+			# current reference position is first element of 2D array (lower left corner), not center
+			cy,cx = centroid_com(img_peak)
+			#cy -= (img_peak.shape[0]-1)/2.
+			#cx -= (img_peak.shape[1]-1)/2.
+			peak_list.append([img[peak_region_i],(cy,cx),r])
+	return peak_list
 
 #Tagging directories with the correct names
 runtag = "r%s"%(options.runNumber)
@@ -59,56 +86,6 @@ if options.maskFile is not None:
 	f.close()
 else:
 	mask = None
-	
-#Function to detect ice peaks and centroids
-def detect_peaks(img, int_threshold, peak_threshold, mask=None, center=None):
-	threshold = int_threshold*(np.mean(img)+np.std(img))
-	image_thresholded = np.copy(img)
-	# TODO: look at only non-masked pixels
-	image_thresholded[img<threshold] = 0
-	#find the peak regions and label all the pixels
-	labeled_image, number_of_peaks = scipy.ndimage.label(image_thresholded)
-	peak_regions = scipy.ndimage.find_objects(labeled_image)
-	peak_list = []
-	for peak_region_i in peak_regions:
-		ry = img[peak_region_i].shape[0]
-		rx = img[peak_region_i].shape[1]
-		if (ry>peak_threshold) and (rx>peak_threshold):
-			img_peak = np.zeros_like(img)
-			img_peak[peak_region_i] = img[peak_region_i]
-			# TODO: improve peak width with 1D Gaussian fit
-			if (ry > rx):
-				r = ry/2.
-			else:
-				r = rx/2.
-			# current reference position is first element of 2D array (lower left corner), not center
-			cy,cx = centroid_com(img_peak)
-			#cy -= (img_peak.shape[0]-1)/2.
-			#cx -= (img_peak.shape[1]-1)/2.
-			peak_list.append([img[peak_region_i],(cy,cx),r])
-	return peak_list
-
-# Function to calculate the sphericity of each peak
-def peak_sphericity(img,int_threshold,peak_threshold, BG_level = 100, photon_threshold = 2000):
-    p = []
-    sphericity_of_peak = []
-    # make a list of the bounding box of the peaks
-    for i in np.arange(len(detect_peaks(img, int_threshold, peak_threshold))):
-        p.append(detect_peaks(img, int_threshold, peak_threshold)[i][0])
-    for p_i in np.arange(len(p)):
-        p_sub = p[p_i] - BG_level
-        p_mask = p_sub > photon_threshold
-        fill_holes = binary_fill_holes(p_mask)
-        contours,_= cv2.findContours(fill_holes.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-        for cnt in contours:
-            perimeter = cv2.arcLength(cnt, True)
-            area = cv2.contourArea(cnt)
-            if perimeter != 0:
-                sphericity = 4*np.pi*area/(perimeter**2)     
-                cnt_string = 'Numbers of contours for peak {} : {}, sphericity: {}'
-                print(cnt_string.format(p_i, len(contours), sphericity))
-                sphericity_of_peak.append((p[p_i],sphericity))
-    return sphericity_of_peak
 
 #Change into data directory to extract *angavg.h5 files from the ice anomaly type
 arr = []
@@ -263,7 +240,7 @@ class img_class (object):
 			print "Press 'p' to save PNG."
 		global colmax
 		global colmin
-		fig = plt.figure(num=None, figsize=(13.5, 5), dpi=100, facecolor='w', edgecolor='k')
+		fig = plt.figure(num=None, figsize=(7, 5), dpi=100, facecolor='w', edgecolor='k')
 		cid1 = fig.canvas.mpl_connect('key_press_event', self.on_keypress_for_viewing)
 		cid2 = fig.canvas.mpl_connect('button_press_event', self.on_click)
 		canvas = fig.add_subplot(121)
@@ -349,20 +326,21 @@ class img_class (object):
 		canvas2 = fig.add_axes([0.7,0.05,0.25,0.9], xlabel="log(sorting score)", ylabel="data")
 		canvas2.set_ylim([0,numData])
 		canvas2.plot(np.log(np.array(scoreKeeper)[ordering]),range(numData))
-		plt.show()  	
+		plt.show()
 
-if options.verbose:
+if options.verbose and not options.processPeaks:
 	print "Right-click on colorbar to set maximum scale."
 	print "Left-click on colorbar to set minimum scale."
 	print "Center-click on colorbar (or press 'r') to reset color scale."
 	print "Interactive controls for zooming at the bottom of figure screen (zooming..etc)."
 	print "Hit Ctl-\ or close all windows (Alt-F4) to terminate viewing program."
 
-currImg = img_class(sorted_arr, None, runtag+"_spectrum_sort%s"%(options.sortTypes))
-#currImg = img_class(unnormed_arr[ordering], None, runtag+"_spectrum_sort%s"%(options.sortTypes))
-currImg.draw_spectrum()
-#currImg = img_class(sorted_arr, unnormed_arr.mean(axis=0), runtag+"_spectrum_sort%s"%(options.sortTypes))
-#currImg.draw_img_for_viewing()
+if not options.processPeaks:
+	currImg = img_class(sorted_arr, None, runtag+"_spectrum_sort%s"%(options.sortTypes))
+	#currImg = img_class(unnormed_arr[ordering], None, runtag+"_spectrum_sort%s"%(options.sortTypes))
+	currImg.draw_spectrum()
+	#currImg = img_class(sorted_arr, unnormed_arr.mean(axis=0), runtag+"_spectrum_sort%s"%(options.sortTypes))
+	#currImg.draw_img_for_viewing()
 
 ########################################################
 # Loop to display all non-anomalous H5 files. 
@@ -392,6 +370,7 @@ rangeNumTypes = range(1,numTypes+1)
 for i in range(numTypes):
 	waveLengths[i] = []
 
+shots = []
 #Tag anomalies
 for fname in anomalies:
 	storeFlag=0
@@ -399,7 +378,7 @@ for fname in anomalies:
 	f = h.File(diffractionName, 'r')
 	d = np.array(f['/data/data'])
 	currWavelengthInAngs=f['LCLS']['photon_wavelength_A'][0]
-	currDetectorDist=(1.E-3)*f['LCLS']['detectorPosition'][0] 
+	currDetectorDist=(1.E-3)*f['LCLS']['detectorPosition'][0]
 	f.close()
 	angAvgName = ice_dir + fname
 	f = h.File(angAvgName, 'r')
@@ -413,11 +392,14 @@ for fname in anomalies:
 	# calculate ice peaks
 	peak_list = detect_peaks(d, options.thresholdIce, options.peakDimension, mask=mask)
 	print "%s: wavelength:%lf, detectorPos:%lf, peaks:%d"%(re.sub("-angavg.h5",'',fname),currWavelengthInAngs,currDetectorDist, len(peak_list))
-	# calculate sphericity
-	sphericity_list = peak_sphericity(d, options.thresholdIce, options.peakDimension)
+	# calculate center of mass
+	
+	# store peaks
+	shots.append({'shot':fname, 'peak_list':[peak_list[i][0] for i in range(len(peak_list))], 'peak_center_of_mass':[peak_list[i][1] for i in range(len(peak_list))], 'peak_radius':[peak_list[i][2] for i in range(len(peak_list))], 'wavelength':currWavelengthInAngs, 'detector_distance':currDetectorDist})
 	# plot peaks
-	currImg = img_class(img_array, davg, fname, peakList=peak_list, meanWaveLengthInAngs=currWavelengthInAngs, detectorDistance=currDetectorDist)
-	currImg.draw_img_for_tagging()
+	if not options.processPeaks:
+		currImg = img_class(img_array, davg, fname, peakList=peak_list, meanWaveLengthInAngs=currWavelengthInAngs, detectorDistance=currDetectorDist)
+		currImg.draw_img_for_tagging()
 	if((storeFlag in rangeNumTypes) and not options.inspectOnly):
 		waveLengths[storeFlag].append(currWavelengthInAngs)
 		avgArr[storeFlag] += d
@@ -430,20 +412,50 @@ for fname in anomalies:
 		os.system("mv " + angAvgName + " " + write_anomaly_dir_types[storeFlag])
 		os.system("cp " + diffractionName + " " + write_anomaly_dir_types[storeFlag])
 
+
+
 #View the averages. Tagging disabled.
-for i in range(numTypes):
-	if (typeOccurences[i] > 0.):
-		print "averaging new hits in type%s.."%i
-		storeFlag=i
-		avgArr[i] /= typeOccurences[i]
-		avgRadAvg[i] /= typeOccurences[i]
-		typeTag = runtag+'_'+'type'+str(i)
-		currImg = img_class(avgArr[i], avgRadAvg[i], typeTag, meanWaveLengthInAngs=np.mean(waveLengths[i]))
-		currImg.draw_img_for_viewing()
-		(sx,sy) = avgArr[i].shape
-		if (not options.inspectOnly):
-			f = h.File(write_anomaly_dir_types[i] + typeTag + ".h5", "w")
-			entry_1 = f.create_group("/data")
-			entry_1.create_dataset("diffraction", data=avgArr[i])
-			entry_1.create_dataset("angavg", data=avgRadAvg[i])	
-			f.close()
+if not options.processPeaks:
+	for i in range(numTypes):
+		if (typeOccurences[i] > 0.):
+			print "averaging new hits in type%s.."%i
+			storeFlag=i
+			avgArr[i] /= typeOccurences[i]
+			avgRadAvg[i] /= typeOccurences[i]
+			typeTag = runtag+'_'+'type'+str(i)
+			currImg = img_class(avgArr[i], avgRadAvg[i], typeTag, meanWaveLengthInAngs=np.mean(waveLengths[i]))
+			currImg.draw_img_for_viewing()
+			(sx,sy) = avgArr[i].shape
+			if (not options.inspectOnly):
+				f = h.File(write_anomaly_dir_types[i] + typeTag + ".h5", "w")
+				entry_1 = f.create_group("/data")
+				entry_1.create_dataset("diffraction", data=avgArr[i])
+				entry_1.create_dataset("angavg", data=avgRadAvg[i])	
+				f.close()
+else:
+	typeTag = runtag+'_'+'type'+str(1)
+	f = h.File(write_anomaly_dir_types[1] + typeTag + "-peaks.h5", "w")
+	entry_1 = f.create_group("/shots")
+	for i in range(len(shots)):
+		entry_3 = entry_1.create_group(shots[i]['shot'])
+		entry_3.create_dataset("wavelengthInAngstrom", data=shots[i]['wavelength'])
+		entry_3.create_dataset("detectorDistanceInMeter", data=shots[i]['detector_distance'])
+		entry_3.create_dataset("numberOfPeaks", data=len(shots[i]['peak_list']))
+		entry_3.create_dataset("peakCenterOfMassInPixels", data=shots[i]['peak_center_of_mass'])
+		entry_3.create_dataset("peakRadiiInPixels", data=shots[i]['peak_radius'])
+		for j in range(len(shots[i]['peak_list'])):
+			entry_4 = entry_3.create_group('peak%d' % j)
+			entry_4.create_dataset("diffraction", data=shots[i]['peak_list'][j])
+			entry_4.create_dataset("centerOfMassInPixels", data=shots[i]['peak_center_of_mass'][j])
+			entry_4.create_dataset("radiusInPixels", data=shots[i]['peak_radius'][j])
+	entry_2 = f.create_group("/LCLS")
+	entry_2.create_dataset("numberOfShots", data=len(shots))
+	entry_2.create_dataset("detectorPixelSizeInMicron", data=109.92)
+	w = [s['wavelength'] for s in shots]
+	entry_2.create_dataset("wavelengthInAngstromMean", data=np.mean(w))
+	entry_2.create_dataset("wavelengthInAngstromStdev", data=np.std(w))
+	d = [s['detector_distance'] for s in shots]
+	entry_2.create_dataset("detectorDistanceInMeterMean", data=np.mean(d))
+	entry_2.create_dataset("detectorDistanceInMeterStdev", data=np.std(d))
+	f.close()
+	print "wrote peak list to: %s" % (typeTag + "-peaks.h5")
