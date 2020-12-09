@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 import numpy as np
 import scipy
 import scipy.ndimage
@@ -259,13 +258,13 @@ class img_class (object):
 			colmax = lims[1]
 			range = colmax - colmin
 			value = colmin + event.ydata * range
-			if event.button is 1 :
+			if event.button == 1 :
 				if value > colmin and value < colmax :
 					colmin = value
-			elif event.button is 2 :
+			elif event.button == 2 :
 				colmin = self.inarr.min()
 				colmax = self.inarr.max()
-			elif event.button is 3 :
+			elif event.button == 3 :
 				if value > colmin and value < colmax:
 					colmax = value
 			plt.clim(colmin, colmax)
