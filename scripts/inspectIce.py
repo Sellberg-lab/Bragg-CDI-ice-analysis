@@ -2,6 +2,7 @@
 import numpy as np
 import scipy
 import scipy.ndimage
+from scipy.ndimage.morphology import binary_fill_holes
 import h5py as h
 import glob
 import os, re, sys
@@ -9,6 +10,7 @@ import matplotlib
 import matplotlib.patches
 import photutils
 from photutils import centroid_com
+# import cv #cannot install after MacOS X upgrade, get errors with cmake related to OpenCL when following: https://www.pyimagesearch.com/2016/11/28/macos-install-opencv-3-and-python-2-7/
 import pylab as plt
 from myModules import extractDetectorDist as eDD
 from optparse import OptionParser
@@ -31,7 +33,7 @@ parser.add_option("-D", "--peakDimension", action="store", type="float", dest="p
 parser.add_option("-v", "--verbose", action="store_true", dest="verbose", help="print more stuff to terminal", default=False)
 (options, args) = parser.parse_args()
 
-#Function to detect ice peaks
+# Function to detect ice peaks and centroids
 def detect_peaks(img, int_threshold, peak_threshold, mask=None, center=None):
 	threshold = int_threshold*(np.mean(img)+np.std(img))
 	image_thresholded = np.copy(img)
@@ -59,6 +61,28 @@ def detect_peaks(img, int_threshold, peak_threshold, mask=None, center=None):
 			peak_list.append([img[peak_region_i],(cy,cx),r])
 	return peak_list
 
+# Function to calculate the sphericity of each peak
+#def peak_sphericity(img, int_threshold,peak_threshold, BG_level = 100, photon_threshold = 2000):
+#	p = []
+#	sphericity_of_peak = []
+#	# make a list of the bounding box of the peaks
+#	for i in np.arange(len(detect_peaks(img, int_threshold, peak_threshold))):
+#		p.append(detect_peaks(img, int_threshold, peak_threshold)[i][0])
+#	for p_i in np.arange(len(p)):
+#		p_sub = p[p_i] - BG_level
+#		p_mask = p_sub > photon_threshold
+#		fill_holes = binary_fill_holes(p_mask)
+#		contours,_= cv2.findContours(fill_holes.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+#		for cnt in contours:
+#			perimeter = cv2.arcLength(cnt, True)
+#			area = cv2.contourArea(cnt)
+#			if perimeter != 0:
+#				sphericity = 4*np.pi*area/(perimeter**2)     
+#				cnt_string = 'Numbers of contours for peak {} : {}, sphericity: {}'
+#				print(cnt_string.format(p_i, len(contours), sphericity))
+#				sphericity_of_peak.append((p[p_i],sphericity))
+#	return sphericity_of_peak
+
 #Tagging directories with the correct names
 runtag = "r%s"%(options.runNumber)
 write_dir = options.outputDir + '_' + runtag + '/'
@@ -73,15 +97,18 @@ for i in range(numTypes):
 ice_dir = [s for s in write_anomaly_dir_types if ("type%d" % 1) in s]
 if len(ice_dir) != 1:
 	if len(ice_dir) == 0:
-		print "found no folder that matches ice type%d, aborting.."
+		print "found no folder that matches ice type1, aborting.."
 		sys.exit(-1)
 	else:
-		print "found multiple folders that matches ice type%d (only first one will be used):", ice_dir
+		print "found multiple folders that matches ice type1 (only first one will be used):", ice_dir
 ice_dir = ice_dir[0]
 
 if options.maskFile is not None:
 	print "reading mask from: %s .." % options.maskFile
-	f = h.File(write_dir + options.maskFile, 'r')
+	try:
+		f = h.File(write_dir + options.maskFile, 'r')
+	except IOError:
+		f = h.File(options.maskFile, 'r')
 	mask = (np.array(f['data']['diffraction']) > 0).astype(np.int)
 	f.close()
 else:
@@ -389,13 +416,13 @@ for fname in anomalies:
 		img_array = np.ma.masked_where(mask==0, d)
 	else:
 		img_array = d
-	# calculate ice peaks
+	# calculate ice peaks and center of mass
 	peak_list = detect_peaks(d, options.thresholdIce, options.peakDimension, mask=mask)
 	print "%s: wavelength:%lf, detectorPos:%lf, peaks:%d"%(re.sub("-angavg.h5",'',fname),currWavelengthInAngs,currDetectorDist, len(peak_list))
-	# calculate center of mass
-	
+	# calculate sphericity
+	#sphericity_list = peak_sphericity(d, options.thresholdIce, options.peakDimension)
 	# store peaks
-	shots.append({'shot':fname, 'peak_list':[peak_list[i][0] for i in range(len(peak_list))], 'peak_center_of_mass':[peak_list[i][1] for i in range(len(peak_list))], 'peak_radius':[peak_list[i][2] for i in range(len(peak_list))], 'wavelength':currWavelengthInAngs, 'detector_distance':currDetectorDist})
+	shots.append({'shot':re.sub("-angavg.h5",'',fname), 'peak_list':[peak_list[i][0] for i in range(len(peak_list))], 'peak_center_of_mass':[peak_list[i][1] for i in range(len(peak_list))], 'peak_radius':[peak_list[i][2] for i in range(len(peak_list))], 'wavelength':currWavelengthInAngs, 'detector_distance':currDetectorDist})
 	# plot peaks
 	if not options.processPeaks:
 		currImg = img_class(img_array, davg, fname, peakList=peak_list, meanWaveLengthInAngs=currWavelengthInAngs, detectorDistance=currDetectorDist)
