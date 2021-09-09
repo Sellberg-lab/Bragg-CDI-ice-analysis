@@ -22,6 +22,7 @@ parser = OptionParser()
 parser.add_option("-r", "--run", action="store", type="string", dest="runNumber", help="run number you wish to view", metavar="rxxxx")
 parser.add_option("-i", "--inspectOnly", action="store_true", dest="inspectOnly", help="inspect output directory", default=False)
 parser.add_option("-p", "--processPeaks", action="store_true", dest="processPeaks", help="processes peaks without inspection", default=False)
+parser.add_option("-s", "--selectShots", action="store", dest="selectShots", help="select shots to inspect", default="")
 parser.add_option("-o", "--outputDir", action="store", type="string", dest="outputDir", help="output directory will be appended by run number (default: output_rxxxx); separate types will be stored in output_rxxxx/type[1-3]", default="output")
 parser.add_option("-t", "--iceType", action="store", type="int", dest="iceType", help="default:1 = output_rxxxx/type1", default=1)
 parser.add_option("-m", "--mask", action="store", type="string", dest="maskFile", help="mask file in the output directory to be used for viewing (default: None)", default=None)
@@ -392,6 +393,18 @@ if options.verbose:
 
 anomalies = sortedFileNames
 
+#Read textfile of selected shots
+if options.selectShots != "":
+	try:
+		with open(options.selectShots) as f:
+			shotsSet = set([fname.strip('\n') for fname in f.readlines()])
+			print "found %d shots in %s" % (len(shotsSet), options.selectShots)
+	except IOError:
+		options.selectShots = ""
+		shotsSet = set([re.sub("-angavg.h5",'',fname) for fname in anomalies])
+else:
+	shotsSet = set([re.sub("-angavg.h5",'',fname) for fname in anomalies])
+
 waveLengths={}
 rangeNumTypes = range(1,numTypes+1)
 for i in range(numTypes):
@@ -424,7 +437,7 @@ for fname in anomalies:
 	# store peaks
 	shots.append({'shot':re.sub("-angavg.h5",'',fname), 'peak_list':[peak_list[i][0] for i in range(len(peak_list))], 'peak_center_of_mass':[peak_list[i][1] for i in range(len(peak_list))], 'peak_radius':[peak_list[i][2] for i in range(len(peak_list))], 'wavelength':currWavelengthInAngs, 'detector_distance':currDetectorDist})
 	# plot peaks
-	if not options.processPeaks:
+	if (not options.processPeaks) and (re.sub("-angavg.h5",'',fname) in shotsSet):
 		currImg = img_class(img_array, davg, fname, peakList=peak_list, meanWaveLengthInAngs=currWavelengthInAngs, detectorDistance=currDetectorDist)
 		currImg.draw_img_for_tagging()
 	if((storeFlag in rangeNumTypes) and not options.inspectOnly):
